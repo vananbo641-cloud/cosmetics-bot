@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+CONTACT   = "@WongnoW225"
 
 DELIVERY_CNY = 43
 STORAGE_CNY  = 50
@@ -64,10 +65,44 @@ for p in PRODUCTS:
     _brand_count[p["b"]] = _brand_count.get(p["b"], 0) + 1
 BRANDS = sorted(_brand_count.items(), key=lambda x: -x[1])
 
+# ── Synonym / fuzzy search maps ──────────────────────────────────────────
+# Russian → Chinese cosmetics terms (so user can search in Russian)
+RU_SEARCH_MAP = {
+    "крем": "面霜", "маска": "面膜", "сыворотка": "精华液", "эссенция": "精华",
+    "тонер": "水", "лосьон": "乳液", "помада": "口红", "бальзам": "唇膏",
+    "тени": "眼影", "тушь": "睫毛膏", "пудра": "粉", "румяна": "腮红",
+    "консилер": "遮瑕", "хайлайтер": "高光", "шампунь": "洗发水",
+    "кондиционер": "护发素", "духи": "香水", "парфюм": "香水",
+    "солнцезащитный": "防晒", "санскрин": "防晒", "spf": "防晒",
+    "очищение": "洁面", "умывание": "洁面", "гель": "洁面",
+    "патчи": "眼膜", "кушон": "气垫", "праймер": "隔离",
+    "карандаш": "笔", "блеск": "唇蜜", "тинт": "唇釉",
+    "скраб": "磨砂", "пилинг": "去角质", "ампула": "安瓶",
+    "масло": "精华油", "спрей": "喷雾", "мист": "喷雾",
+    "ночной": "晚", "дневной": "日", "увлажняющий": "保湿",
+    "отбеливающий": "美白", "антивозрастной": "抗老",
+    "глаза": "眼", "губы": "唇", "лицо": "面", "тело": "身体",
+}
+# English → Chinese cosmetics terms
+EN_SEARCH_MAP = {
+    "cream": "面霜", "mask": "面膜", "serum": "精华", "essence": "精华",
+    "toner": "水", "lotion": "乳液", "lipstick": "口红", "lip balm": "唇膏",
+    "eyeshadow": "眼影", "eye shadow": "眼影", "mascara": "睫毛膏",
+    "powder": "粉", "blush": "腮红", "concealer": "遮瑕",
+    "highlighter": "高光", "shampoo": "洗发水", "conditioner": "护发素",
+    "perfume": "香水", "fragrance": "香水", "sunscreen": "防晒",
+    "cleanser": "洁面", "face wash": "洁面", "cushion": "气垫",
+    "primer": "隔离", "foundation": "粉底", "lip gloss": "唇蜜",
+    "lip tint": "唇釉", "scrub": "磨砂", "spray": "喷雾",
+    "moisturizer": "保湿", "moisturizing": "保湿", "whitening": "美白",
+    "anti-aging": "抗老", "eye cream": "眼霜", "eye": "眼",
+    "lip": "唇", "body": "身体", "night": "晚", "day": "日",
+    "oil": "油", "ampoule": "安瓶",
+}
 
-# ── Translation engine (same logic as the website) ────────────────────────
+
+# ── Translation engine ────────────────────────────────────────────────────
 def tr_brand(brand_zh: str, lang: str) -> str:
-    """Translate a Chinese brand name to the target language."""
     if lang == "zh":
         return brand_zh
     if lang == "ru" and brand_zh in TB_RU:
@@ -78,7 +113,6 @@ def tr_brand(brand_zh: str, lang: str) -> str:
 
 
 def tr_name(name: str, lang: str) -> str:
-    """Translate a Chinese product name to the target language."""
     if lang == "zh":
         return name
 
@@ -86,29 +120,23 @@ def tr_name(name: str, lang: str) -> str:
     td = TD_RU if lang == "ru" else TD_EN
     keys = _TK_RU if lang == "ru" else _TK_EN
 
-    # Step 1: Translate brand names in the text
     for zh, en in TB.items():
         if zh in r:
             rep = TB_RU.get(zh, en) if lang == "ru" else en
             r = r.replace(zh, rep + " ")
 
-    # Step 2: Translate cosmetics terms (longest match first)
     for k in keys:
         if k in r:
             r = r.replace(k, " " + td[k] + " ")
 
-    # Step 3: Clean up spacing
     r = re.sub(r"\s{2,}", " ", r).strip()
-    # Add space between Latin/CJK boundaries
     r = re.sub(r"([a-zA-ZÀ-ɏ])(\d)", r"\1 \2", r)
     r = re.sub(r"(\d)([a-zA-ZÀ-ɏ])", r"\1 \2", r)
     r = re.sub(r"([一-鿿])([A-Za-zÀ-ɏЀ-ӿ])", r"\1 \2", r)
     r = re.sub(r"([A-Za-zÀ-ɏЀ-ӿ])([一-鿿])", r"\1 \2", r)
 
-    # Step 4: Strip any remaining CJK characters
     r = re.sub(r"[一-鿿㐀-䶿　-〿぀-ゟ゠-ヿ]+", " ", r)
     r = re.sub(r"\s{2,}", " ", r).strip()
-
     return r
 
 
@@ -116,15 +144,26 @@ def tr_name(name: str, lang: str) -> str:
 L = {
     "ru": {
         "welcome": (
-            "🎀 <b>Каталог косметики — Янь</b>\n\n"
-            "Я помогу найти любую косметику и рассчитаю цену с доставкой в Россию!\n\n"
-            "📦 В цену включено:\n"
-            "• Товар\n"
-            "• Доставка из Китая\n"
-            "• Хранение на складе\n\n"
-            "👇 <b>Выберите действие или введите название товара:</b>"
+            "✨ <b>Янь's Beauty Shop</b> ✨\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🌸 <i>Лучшая косметика из Китая — прямо к вашей двери</i>\n\n"
+            "🔹 6600+ товаров от 350 брендов\n"
+            "🔹 Цена с доставкой до России\n"
+            "🔹 Chanel, Dior, Lancôme, La Mer и др.\n\n"
+            "Просто введите название — я найду товар "
+            "и покажу финальную цену! 💰\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📩 Заказать: {CONTACT}\n"
+            "👇 Выберите действие:"
         ),
-        "no_results": "😕 По запросу «{q}» ничего не найдено.\nПопробуйте другое название.",
+        "no_results": (
+            "😕 По запросу «{q}» ничего не найдено.\n\n"
+            "💡 <b>Подсказки:</b>\n"
+            "• Попробуйте короче: <code>Dior крем</code>\n"
+            "• Бренд на английском: <code>Chanel</code>\n"
+            "• Тип товара: <code>маска</code>, <code>крем</code>, <code>помада</code>\n"
+            "• Или нажмите 🏷 Бренды"
+        ),
         "found": "🔍 По запросу «<b>{q}</b>» найдено <b>{n}</b> товаров:",
         "price_line": "   💰 <b>¥{cny}</b>  (~<b>{rub} ₽</b>)",
         "page": "📄 Стр. {cur} из {total}",
@@ -133,12 +172,22 @@ L = {
         "lang_switched": "✅ Язык: Русский 🇷🇺",
         "prev": "⬅️ Назад",
         "next": "➡️ Далее",
-        "pricing_note": "\n<i>💡 Цена = товар + доставка Китай→Россия + хранение</i>",
+        "pricing_note": (
+            "\n<i>💡 Цена = товар + доставка + хранение</i>\n"
+            f"📩 <b>Заказать:</b> {CONTACT}"
+        ),
         "help": (
-            "🔍 Введите название товара или бренда\n"
+            "📖 <b>Как пользоваться:</b>\n\n"
+            "🔍 Просто напишите что ищете:\n"
+            "   • <code>Dior помада</code>\n"
+            "   • <code>Chanel крем</code>\n"
+            "   • <code>маска для лица</code>\n"
+            "   • <code>lancome сыворотка</code>\n\n"
+            "Я понимаю русский, английский и китайский!\n\n"
             "🏷 /brands — популярные бренды\n"
-            "🔤 /lang — сменить язык\n"
-            "📊 /pricing — как формируется цена"
+            "📊 /pricing — как формируется цена\n"
+            "🔤 /lang — сменить язык\n\n"
+            f"📩 <b>Заказать:</b> {CONTACT}"
         ),
         "pricing_info": (
             "📊 <b>Как формируется цена:</b>\n\n"
@@ -147,27 +196,44 @@ L = {
             "3️⃣ + Хранение на складе (7 дней)\n"
             "4️⃣ + Комиссия сервиса\n\n"
             "= <b>Итоговая цена</b> в ¥ и ₽\n\n"
-            "Курс: 1 ¥ ≈ {rate} ₽"
+            "💱 Курс: 1 ¥ ≈ {rate} ₽\n\n"
+            f"📩 <b>Заказать:</b> {CONTACT}"
         ),
-        # Menu buttons
         "menu_search": "🔍 Поиск товара",
         "menu_brands": "🏷 Бренды",
         "menu_pricing": "📊 О ценах",
         "menu_lang": "🔤 Язык / Language",
         "menu_help": "❓ Помощь",
-        "search_prompt": "🔍 Введите название товара или бренда:",
+        "menu_buy": "🛒 Заказать",
+        "search_prompt": "🔍 Введите название товара или бренда.\n\nПримеры: <code>Dior крем</code>, <code>маска</code>, <code>Chanel</code>",
+        "buy_msg": (
+            "🛒 <b>Хотите заказать?</b>\n\n"
+            "Напишите мне напрямую — я помогу с заказом!\n\n"
+            f"📩 Telegram: <b>{CONTACT}</b>\n\n"
+            "Отправьте название товара и я подготовлю заказ 💫"
+        ),
     },
     "zh": {
         "welcome": (
-            "🎀 <b>化妆品报价查询 — Янь的店</b>\n\n"
-            "帮您查找化妆品并计算含运费的最终到手价！\n\n"
-            "📦 价格已包含：\n"
-            "• 商品费\n"
-            "• 中国到俄罗斯运费\n"
-            "• 仓储费\n\n"
-            "👇 <b>选择功能或直接输入商品名称：</b>"
+            "✨ <b>Янь的美妆小店</b> ✨\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🌸 <i>正品化妆品，中国直邮俄罗斯</i>\n\n"
+            "🔹 6600+ 商品，350+ 品牌\n"
+            "🔹 价格含运费和仓储\n"
+            "🔹 香奈儿、迪奥、兰蔻、海蓝之谜等\n\n"
+            "输入商品名称，即刻查询到手价！💰\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📩 下单联系：{CONTACT}\n"
+            "👇 选择功能："
         ),
-        "no_results": "😕 未找到「{q}」相关商品。\n请换个关键词试试。",
+        "no_results": (
+            "😕 未找到「{q}」相关商品。\n\n"
+            "💡 <b>搜索技巧：</b>\n"
+            "• 试试更短的关键词：<code>兰蔻 精华</code>\n"
+            "• 品牌名：<code>香奈儿</code>、<code>Dior</code>\n"
+            "• 产品类型：<code>面膜</code>、<code>口红</code>、<code>眼霜</code>\n"
+            "• 或点击 🏷 品牌列表 浏览"
+        ),
         "found": "🔍 搜索「<b>{q}</b>」找到 <b>{n}</b> 件商品：",
         "price_line": "   💰 <b>¥{cny}</b>  (~<b>{rub} ₽</b>)",
         "page": "📄 第 {cur}/{total} 页",
@@ -176,12 +242,22 @@ L = {
         "lang_switched": "✅ 语言：中文 🇨🇳",
         "prev": "⬅️ 上一页",
         "next": "➡️ 下一页",
-        "pricing_note": "\n<i>💡 价格 = 商品 + 中俄运费 + 仓储费</i>",
+        "pricing_note": (
+            "\n<i>💡 价格 = 商品 + 中俄运费 + 仓储</i>\n"
+            f"📩 <b>下单：</b>{CONTACT}"
+        ),
         "help": (
-            "🔍 直接发送商品名或品牌名搜索\n"
-            "🏷 /brands — 查看热门品牌\n"
-            "🔤 /lang — 切换语言\n"
-            "📊 /pricing — 价格说明"
+            "📖 <b>使用说明：</b>\n\n"
+            "🔍 直接输入您要找的商品：\n"
+            "   • <code>兰蔻 精华</code>\n"
+            "   • <code>Dior 口红</code>\n"
+            "   • <code>面膜</code>\n"
+            "   • <code>玻色因</code>\n\n"
+            "支持中文、英文搜索！\n\n"
+            "🏷 /brands — 热门品牌\n"
+            "📊 /pricing — 价格说明\n"
+            "🔤 /lang — 切换语言\n\n"
+            f"📩 <b>下单联系：</b>{CONTACT}"
         ),
         "pricing_info": (
             "📊 <b>价格构成说明：</b>\n\n"
@@ -190,15 +266,22 @@ L = {
             "3️⃣ + 仓储费（7天）\n"
             "4️⃣ + 服务佣金\n\n"
             "= <b>最终到手价</b>（¥ 和 ₽）\n\n"
-            "汇率：1 ¥ ≈ {rate} ₽"
+            "💱 汇率：1 ¥ ≈ {rate} ₽\n\n"
+            f"📩 <b>下单联系：</b>{CONTACT}"
         ),
-        # Menu buttons
         "menu_search": "🔍 搜索商品",
         "menu_brands": "🏷 品牌列表",
         "menu_pricing": "📊 价格说明",
         "menu_lang": "🔤 语言 / Язык",
         "menu_help": "❓ 帮助",
-        "search_prompt": "🔍 请输入商品名称或品牌名：",
+        "menu_buy": "🛒 下单",
+        "search_prompt": "🔍 请输入商品名称或品牌名。\n\n例如：<code>兰蔻 精华</code>、<code>面膜</code>、<code>Dior</code>",
+        "buy_msg": (
+            "🛒 <b>想要下单？</b>\n\n"
+            "请直接联系我，我会帮您处理订单！\n\n"
+            f"📩 Telegram：<b>{CONTACT}</b>\n\n"
+            "发送商品名称，我来为您安排 💫"
+        ),
     },
 }
 
@@ -214,12 +297,11 @@ def get_lang(ctx: ContextTypes.DEFAULT_TYPE) -> str:
 
 
 def get_menu_keyboard(ctx: ContextTypes.DEFAULT_TYPE) -> ReplyKeyboardMarkup:
-    """Build the persistent bottom menu keyboard."""
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton(t(ctx, "menu_search")), KeyboardButton(t(ctx, "menu_brands"))],
-            [KeyboardButton(t(ctx, "menu_pricing")), KeyboardButton(t(ctx, "menu_lang"))],
-            [KeyboardButton(t(ctx, "menu_help"))],
+            [KeyboardButton(t(ctx, "menu_buy")),    KeyboardButton(t(ctx, "menu_pricing"))],
+            [KeyboardButton(t(ctx, "menu_lang")),   KeyboardButton(t(ctx, "menu_help"))],
         ],
         resize_keyboard=True,
     )
@@ -239,44 +321,155 @@ def calc_customer_price(base_price: float) -> tuple[float, float]:
     return customer_cny, customer_rub
 
 
-# ── Search ────────────────────────────────────────────────────────────────
+# ── Smart Search ──────────────────────────────────────────────────────────
 def _norm(s: str) -> str:
     s = s.lower()
     nfkd = unicodedata.normalize("NFKD", s)
     return "".join(c for c in nfkd if not unicodedata.combining(c) and c not in "''")
 
-# Build reverse English→Chinese brand map
+# Build reverse brand maps for search
 _EN_TO_ZH: dict[str, str] = {}
 for _zh, _en in TB.items():
     _EN_TO_ZH[_norm(_en)] = _zh
-
-# Also index Russian brand names
 for _zh, _ru in TB_RU.items():
     _EN_TO_ZH[_norm(_ru)] = _zh
 
 
+def _expand_word(w: str) -> dict:
+    """
+    Expand one word into a search hint.
+    Returns {"type": "brand"|"term"|"raw", "zh": "...", "original": "..."}
+    """
+    w_low = w.lower()
+
+    # Check Russian cosmetics terms
+    for ru_term, zh_term in RU_SEARCH_MAP.items():
+        if w_low == ru_term or (len(w_low) >= 4 and ru_term.startswith(w_low)):
+            return {"type": "term", "zh": zh_term, "original": w}
+
+    # Check English cosmetics terms
+    for en_term, zh_term in EN_SEARCH_MAP.items():
+        if w_low == en_term or w_low in en_term.split():
+            return {"type": "term", "zh": zh_term, "original": w}
+
+    # Check brand names
+    w_norm = _norm(w)
+    for en_norm, zh in _EN_TO_ZH.items():
+        if w_norm in en_norm or en_norm.startswith(w_norm):
+            return {"type": "brand", "zh": zh, "original": w}
+
+    return {"type": "raw", "zh": w, "original": w}
+
+
 def search_products(query: str) -> list[dict]:
-    q = _norm(query.strip())
-    if not q:
+    """
+    Smart search: handles partial names, mixed languages, multi-word queries.
+    E.g. "dior крем" → finds Dior brand + 面霜 in name
+    E.g. "lancome mask" → finds 兰蔻 brand + 面膜 in name
+    E.g. "маска" → finds all products with 面膜
+    """
+    raw = query.strip()
+    if not raw:
         return []
 
+    q_norm = _norm(raw)
+
+    # ── Pass 1: Direct substring match ────────────────────────────────
+    direct = []
     matched_zh_brands = set()
     for name_norm, zh in _EN_TO_ZH.items():
-        if q in name_norm:
+        if q_norm in name_norm:
             matched_zh_brands.add(zh)
 
-    results = []
     for p in PRODUCTS:
-        if q in _norm(p["n"]) or q in _norm(p["b"]):
-            results.append(p)
+        if q_norm in _norm(p["n"]) or q_norm in _norm(p["b"]):
+            direct.append(p)
         elif any(p["b"] == zh or zh in p["b"] for zh in matched_zh_brands):
-            results.append(p)
+            direct.append(p)
 
-    return results
+    if direct:
+        return direct
+
+    # ── Pass 2: Smart multi-word expansion ────────────────────────────
+    words = raw.split()
+    expanded = [_expand_word(w) for w in words]
+
+    brand_filters = [e["zh"] for e in expanded if e["type"] == "brand"]
+    term_filters  = [e["zh"] for e in expanded if e["type"] == "term"]
+    raw_filters   = [e["zh"].lower() for e in expanded if e["type"] == "raw"]
+
+    if brand_filters or term_filters:
+        results = []
+        for p in PRODUCTS:
+            # Brand must match (if any brand words given)
+            if brand_filters:
+                brand_ok = any(p["b"] == bf or bf in p["b"] for bf in brand_filters)
+            else:
+                brand_ok = True
+
+            # Term must appear in product name (if any term words given)
+            if term_filters:
+                term_ok = all(tf in p["n"].lower() for tf in term_filters)
+            else:
+                term_ok = True
+
+            # Raw words must appear somewhere
+            if raw_filters:
+                combined = (p["n"] + " " + p["b"]).lower()
+                raw_ok = all(rf in combined for rf in raw_filters)
+            else:
+                raw_ok = True
+
+            if brand_ok and term_ok and raw_ok:
+                results.append(p)
+
+        if results:
+            return results
+
+        # Relax: try any brand + any term
+        if brand_filters and term_filters:
+            results = []
+            for p in PRODUCTS:
+                brand_ok = any(p["b"] == bf or bf in p["b"] for bf in brand_filters)
+                term_ok = any(tf in p["n"].lower() for tf in term_filters)
+                if brand_ok and term_ok:
+                    results.append(p)
+            if results:
+                return results
+
+        # Even more relaxed: just brand OR term
+        results = []
+        all_zh = [e["zh"].lower() for e in expanded]
+        for p in PRODUCTS:
+            combined = (p["n"] + " " + p["b"]).lower()
+            if any(z in combined for z in all_zh):
+                results.append(p)
+        if results:
+            return results
+
+    # ── Pass 3: Raw word matching on normalized text ──────────────────
+    norm_words = [_norm(w) for w in words if len(w) >= 2]
+    if norm_words:
+        results = []
+        for p in PRODUCTS:
+            combined = _norm(p["n"] + " " + p["b"])
+            if all(w in combined for w in norm_words):
+                results.append(p)
+        if results:
+            return results
+
+        results = []
+        for p in PRODUCTS:
+            combined = _norm(p["n"] + " " + p["b"])
+            if any(w in combined for w in norm_words):
+                results.append(p)
+        if results:
+            return results
+
+    return []
 
 
 def format_product(p: dict, idx: int, ctx: ContextTypes.DEFAULT_TYPE) -> str:
-    """Format a product — fully translated based on user language."""
     lang = get_lang(ctx)
     name = tr_name(p["n"], lang)
     brand = tr_brand(p["b"], lang)
@@ -364,9 +557,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith("lang:"):
         lang = data.split(":")[1]
         ctx.user_data["lang"] = lang
-        # Send language confirmation + refresh menu
         await query.edit_message_text(t(ctx, "lang_switched"), parse_mode="HTML")
-        # Send a new message with updated menu
         await query.message.reply_text(
             t(ctx, "welcome"),
             parse_mode="HTML",
@@ -391,48 +582,43 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Handle text messages — either menu buttons or search queries."""
     text = update.message.text.strip()
     if not text or len(text) > 100:
         return
 
-    # Check if it's a menu button press
     lang = get_lang(ctx)
-    menu_search = L[lang]["menu_search"]
-    menu_brands = L[lang]["menu_brands"]
-    menu_pricing = L[lang]["menu_pricing"]
-    menu_lang = L[lang]["menu_lang"]
-    menu_help = L[lang]["menu_help"]
 
-    if text == menu_search:
-        await update.message.reply_text(
-            t(ctx, "search_prompt"), parse_mode="HTML",
-            reply_markup=get_menu_keyboard(ctx),
-        )
-        return
-    elif text == menu_brands:
-        await cmd_brands(update, ctx)
-        return
-    elif text == menu_pricing:
-        await cmd_pricing(update, ctx)
-        return
-    elif text == menu_lang:
-        await cmd_lang(update, ctx)
-        return
-    elif text == menu_help:
-        await cmd_help(update, ctx)
-        return
+    # Check menu buttons
+    for key in ("menu_search", "menu_brands", "menu_pricing", "menu_lang",
+                "menu_help", "menu_buy"):
+        if text == L[lang][key]:
+            if key == "menu_search":
+                await update.message.reply_text(
+                    t(ctx, "search_prompt"), parse_mode="HTML",
+                    reply_markup=get_menu_keyboard(ctx),
+                )
+            elif key == "menu_brands":
+                await cmd_brands(update, ctx)
+            elif key == "menu_pricing":
+                await cmd_pricing(update, ctx)
+            elif key == "menu_lang":
+                await cmd_lang(update, ctx)
+            elif key == "menu_help":
+                await cmd_help(update, ctx)
+            elif key == "menu_buy":
+                await update.message.reply_text(
+                    t(ctx, "buy_msg"), parse_mode="HTML",
+                    reply_markup=get_menu_keyboard(ctx),
+                )
+            return
 
     # Otherwise treat as search
     results = search_products(text)
-    lang = get_lang(ctx)
-    # If user typed an English/Russian brand, show that as query display
-    display_q = text
-    ctx.user_data["last_query"] = display_q
+    ctx.user_data["last_query"] = text
     ctx.user_data["results"] = results
     ctx.user_data["page"] = 0
 
-    await send_results_page(update.message, ctx, display_q)
+    await send_results_page(update.message, ctx, text)
 
 
 async def send_results_page(
@@ -500,8 +686,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("🤖 Bot started! %d products, %d brands, %d EN terms, %d RU terms.",
-                len(PRODUCTS), len(BRANDS), len(TD_EN), len(TD_RU))
+    logger.info("🤖 Bot started! %d products, %d brands.", len(PRODUCTS), len(BRANDS))
     app.run_polling(drop_pending_updates=True)
 
 
