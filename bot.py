@@ -18,8 +18,11 @@ Pricing formula:
   customer_rub   = customer_price × CNY_TO_RUB rate
 """
 
-import json, os, math, logging, unicodedata
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import json, os, math, re, logging, unicodedata
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    ReplyKeyboardMarkup, KeyboardButton,
+)
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters,
@@ -31,181 +34,235 @@ logger = logging.getLogger(__name__)
 # ── Config ────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# Cost parameters (easy to adjust)
-DELIVERY_CNY = 43       # $6 shipping per item
-STORAGE_CNY  = 50       # 7 days × $1/day
-OVERHEAD     = DELIVERY_CNY + STORAGE_CNY   # ¥93 total
+DELIVERY_CNY = 43
+STORAGE_CNY  = 50
+OVERHEAD     = DELIVERY_CNY + STORAGE_CNY   # ¥93
 
-CNY_TO_RUB   = 12.0     # 1 CNY ≈ 12 RUB (adjust as needed)
+CNY_TO_RUB   = 12.0
+ITEMS_PER_PAGE = 8
 
-ITEMS_PER_PAGE = 8       # results per page in search
+# ── Load data ─────────────────────────────────────────────────────────────
+_dir = os.path.dirname(os.path.abspath(__file__))
 
-# ── Load product data ─────────────────────────────────────────────────────
-with open(os.path.join(os.path.dirname(__file__), "products.json"), "r") as f:
+with open(os.path.join(_dir, "products.json"), "r") as f:
     PRODUCTS = json.load(f)
 
-# Build brand list (sorted by count)
+with open(os.path.join(_dir, "translations.json"), "r") as f:
+    _tr = json.load(f)
+    TD_EN = _tr["td_en"]    # Chinese term → English
+    TD_RU = _tr["td_ru"]    # Chinese term → Russian
+    TB    = _tr["tb"]        # Chinese brand → English brand
+    TB_RU = _tr["tb_ru"]    # Chinese brand → Russian brand (overrides)
+
+# Pre-sort term keys by length desc (longest match first)
+_TK_EN = sorted(TD_EN.keys(), key=len, reverse=True)
+_TK_RU = sorted(TD_RU.keys(), key=len, reverse=True)
+
+# Build brand list
 _brand_count: dict[str, int] = {}
 for p in PRODUCTS:
     _brand_count[p["b"]] = _brand_count.get(p["b"], 0) + 1
 BRANDS = sorted(_brand_count.items(), key=lambda x: -x[1])
 
-# ── Translation dict (brand zh→en for display) ───────────────────────────
-TB = {
-    "欧莱雅":"L'Oréal","珀莱雅":"Proya","香奈儿":"Chanel","兰蔻":"Lancôme",
-    "雅诗兰黛":"Estée Lauder","海蓝之谜":"La Mer","毛戈平":"Mao Geping",
-    "卡诗":"Kérastase","修丽可":"SkinCeuticals","橘朵":"Judydoll",
-    "阿玛尼":"Armani","玉兰油OLAY":"OLAY","彩棠":"Timage","理肤泉":"La Roche-Posay",
-    "古驰":"Gucci","TF汤姆福特":"Tom Ford","娇韵诗":"Clarins","Whoo后":"Whoo",
-    "爱马仕":"Hermès","HR赫莲娜":"Helena Rubinstein","资生堂":"Shiseido",
-    "科颜氏":"Kiehl's","宝格丽":"Bvlgari","娇兰":"Guerlain",
-    "CPB肌肤之钥":"Clé de Peau","巴宝莉":"Burberry","莱珀妮":"La Prairie",
-    "纪梵希":"Givenchy","韩束":"Kans","欧舒丹":"L'Occitane","植村秀":"Shu Uemura",
-    "祖马龙":"Jo Malone","馥蕾诗":"Fresh","百瑞德":"Byredo","雅漾":"Avène",
-    "芭比布朗":"Bobbi Brown","倩碧":"Clinique","玫珂菲":"Make Up For Ever",
-    "奥尔滨":"Albion","雪花秀":"Sulwhasoo","薇姿":"Vichy","碧欧泉":"Biotherm",
-    "希思黎":"Sisley","丝芙兰":"Sephora","美宝莲":"Maybelline","兰芝":"Laneige",
-    "YSL圣罗兰":"YSL","Dior迪奥":"Dior","3CE":"3CE","MAC":"MAC","SK-II":"SK-II",
-    "NARS":"NARS","HBN":"HBN","花知晓":"Flower Knows","FanBeauty范冰冰":"FanBeauty",
-}
+
+# ── Translation engine (same logic as the website) ────────────────────────
+def tr_brand(brand_zh: str, lang: str) -> str:
+    """Translate a Chinese brand name to the target language."""
+    if lang == "zh":
+        return brand_zh
+    if lang == "ru" and brand_zh in TB_RU:
+        return TB_RU[brand_zh]
+    if brand_zh in TB:
+        return TB[brand_zh]
+    return brand_zh
+
+
+def tr_name(name: str, lang: str) -> str:
+    """Translate a Chinese product name to the target language."""
+    if lang == "zh":
+        return name
+
+    r = name
+    td = TD_RU if lang == "ru" else TD_EN
+    keys = _TK_RU if lang == "ru" else _TK_EN
+
+    # Step 1: Translate brand names in the text
+    for zh, en in TB.items():
+        if zh in r:
+            rep = TB_RU.get(zh, en) if lang == "ru" else en
+            r = r.replace(zh, rep + " ")
+
+    # Step 2: Translate cosmetics terms (longest match first)
+    for k in keys:
+        if k in r:
+            r = r.replace(k, " " + td[k] + " ")
+
+    # Step 3: Clean up spacing
+    r = re.sub(r"\s{2,}", " ", r).strip()
+    # Add space between Latin/CJK boundaries
+    r = re.sub(r"([a-zA-ZÀ-ɏ])(\d)", r"\1 \2", r)
+    r = re.sub(r"(\d)([a-zA-ZÀ-ɏ])", r"\1 \2", r)
+    r = re.sub(r"([一-鿿])([A-Za-zÀ-ɏЀ-ӿ])", r"\1 \2", r)
+    r = re.sub(r"([A-Za-zÀ-ɏЀ-ӿ])([一-鿿])", r"\1 \2", r)
+
+    # Step 4: Strip any remaining CJK characters
+    r = re.sub(r"[一-鿿㐀-䶿　-〿぀-ゟ゠-ヿ]+", " ", r)
+    r = re.sub(r"\s{2,}", " ", r).strip()
+
+    return r
+
 
 # ── i18n ──────────────────────────────────────────────────────────────────
 L = {
     "ru": {
         "welcome": (
-            "🎀 <b>Каталог косметики</b>\n\n"
-            "Отправьте мне <b>название бренда или товара</b> — "
-            "я найду его и покажу цену с доставкой в Россию.\n\n"
-            "Примеры: <code>Chanel</code>, <code>兰蔻</code>, <code>Dior</code>, "
-            "<code>маска</code>, <code>крем</code>\n\n"
-            "📦 В цену уже включена доставка и хранение.\n\n"
-            "🔤 /lang — сменить язык\n"
-            "🏷 /brands — популярные бренды"
+            "🎀 <b>Каталог косметики — Янь</b>\n\n"
+            "Я помогу найти любую косметику и рассчитаю цену с доставкой в Россию!\n\n"
+            "📦 В цену включено:\n"
+            "• Товар\n"
+            "• Доставка из Китая\n"
+            "• Хранение на складе\n\n"
+            "👇 <b>Выберите действие или введите название товара:</b>"
         ),
-        "no_results": "😕 Ничего не найдено по запросу «{q}». Попробуйте другой запрос.",
-        "found": "🔍 Найдено <b>{n}</b> товаров по запросу «<b>{q}</b>»:",
-        "price_line": (
-            "   💰 <b>¥{cny}</b>  (~<b>{rub} ₽</b>)"
-        ),
-        "page": "Стр. {cur}/{total}",
-        "ask_price": "📞 Цена по запросу",
-        "brands_title": "🏷 <b>Популярные бренды</b> (нажмите для поиска):",
-        "lang_switched": "✅ Язык переключён на русский.",
+        "no_results": "😕 По запросу «{q}» ничего не найдено.\nПопробуйте другое название.",
+        "found": "🔍 По запросу «<b>{q}</b>» найдено <b>{n}</b> товаров:",
+        "price_line": "   💰 <b>¥{cny}</b>  (~<b>{rub} ₽</b>)",
+        "page": "📄 Стр. {cur} из {total}",
+        "ask_price": "   📞 Цена по запросу",
+        "brands_title": "🏷 <b>Популярные бренды</b>\nНажмите, чтобы найти товары:",
+        "lang_switched": "✅ Язык: Русский 🇷🇺",
         "prev": "⬅️ Назад",
         "next": "➡️ Далее",
-        "pricing_note": (
-            "\n\n<i>💡 Цена включает: товар + доставка Китай→Россия + хранение</i>"
-        ),
+        "pricing_note": "\n<i>💡 Цена = товар + доставка Китай→Россия + хранение</i>",
         "help": (
-            "🔍 Просто отправьте название товара или бренда.\n"
-            "🏷 /brands — посмотреть популярные бренды\n"
+            "🔍 Введите название товара или бренда\n"
+            "🏷 /brands — популярные бренды\n"
             "🔤 /lang — сменить язык\n"
-            "ℹ️ /pricing — как формируется цена"
+            "📊 /pricing — как формируется цена"
         ),
         "pricing_info": (
             "📊 <b>Как формируется цена:</b>\n\n"
-            "• Оптовая цена товара\n"
-            "• + Доставка из Китая (~$6)\n"
-            "• + Хранение на складе (7 дней)\n"
-            "• + Комиссия сервиса\n\n"
-            "= Итоговая цена для вас в ¥ и ₽\n\n"
+            "1️⃣ Оптовая цена товара\n"
+            "2️⃣ + Доставка из Китая (~$6)\n"
+            "3️⃣ + Хранение на складе (7 дней)\n"
+            "4️⃣ + Комиссия сервиса\n\n"
+            "= <b>Итоговая цена</b> в ¥ и ₽\n\n"
             "Курс: 1 ¥ ≈ {rate} ₽"
         ),
+        # Menu buttons
+        "menu_search": "🔍 Поиск товара",
+        "menu_brands": "🏷 Бренды",
+        "menu_pricing": "📊 О ценах",
+        "menu_lang": "🔤 Язык / Language",
+        "menu_help": "❓ Помощь",
+        "search_prompt": "🔍 Введите название товара или бренда:",
     },
     "zh": {
         "welcome": (
-            "🎀 <b>化妆品报价查询机器人</b>\n\n"
-            "发送<b>品牌名称或商品名称</b>，"
-            "我会帮你查找商品并计算含运费的最终价格。\n\n"
-            "示例：<code>兰蔻</code>、<code>Dior</code>、<code>面膜</code>、"
-            "<code>精华</code>\n\n"
-            "📦 价格已包含中国到俄罗斯运费和仓储费。\n\n"
-            "🔤 /lang — 切换语言\n"
-            "🏷 /brands — 热门品牌"
+            "🎀 <b>化妆品报价查询 — Янь的店</b>\n\n"
+            "帮您查找化妆品并计算含运费的最终到手价！\n\n"
+            "📦 价格已包含：\n"
+            "• 商品费\n"
+            "• 中国到俄罗斯运费\n"
+            "• 仓储费\n\n"
+            "👇 <b>选择功能或直接输入商品名称：</b>"
         ),
-        "no_results": "😕 未找到「{q}」相关商品，请换个关键词试试。",
+        "no_results": "😕 未找到「{q}」相关商品。\n请换个关键词试试。",
         "found": "🔍 搜索「<b>{q}</b>」找到 <b>{n}</b> 件商品：",
-        "price_line": (
-            "   💰 <b>¥{cny}</b>  (~<b>{rub} ₽</b>)"
-        ),
-        "page": "第 {cur}/{total} 页",
-        "ask_price": "📞 需询价",
-        "brands_title": "🏷 <b>热门品牌</b>（点击搜索）：",
-        "lang_switched": "✅ 已切换为中文。",
+        "price_line": "   💰 <b>¥{cny}</b>  (~<b>{rub} ₽</b>)",
+        "page": "📄 第 {cur}/{total} 页",
+        "ask_price": "   📞 需询价",
+        "brands_title": "🏷 <b>热门品牌</b>\n点击查看该品牌商品：",
+        "lang_switched": "✅ 语言：中文 🇨🇳",
         "prev": "⬅️ 上一页",
         "next": "➡️ 下一页",
-        "pricing_note": (
-            "\n\n<i>💡 价格包含：商品 + 中俄运费 + 仓储费</i>"
-        ),
+        "pricing_note": "\n<i>💡 价格 = 商品 + 中俄运费 + 仓储费</i>",
         "help": (
-            "🔍 直接发送商品名或品牌名即可搜索\n"
+            "🔍 直接发送商品名或品牌名搜索\n"
             "🏷 /brands — 查看热门品牌\n"
             "🔤 /lang — 切换语言\n"
-            "ℹ️ /pricing — 价格说明"
+            "📊 /pricing — 价格说明"
         ),
         "pricing_info": (
             "📊 <b>价格构成说明：</b>\n\n"
-            "• 商品批发价\n"
-            "• + 中国到俄罗斯运费（约$6）\n"
-            "• + 仓储费（7天）\n"
-            "• + 服务佣金\n\n"
-            "= 最终到手价（¥ 和 ₽）\n\n"
+            "1️⃣ 商品批发价\n"
+            "2️⃣ + 中国到俄罗斯运费（约$6）\n"
+            "3️⃣ + 仓储费（7天）\n"
+            "4️⃣ + 服务佣金\n\n"
+            "= <b>最终到手价</b>（¥ 和 ₽）\n\n"
             "汇率：1 ¥ ≈ {rate} ₽"
         ),
+        # Menu buttons
+        "menu_search": "🔍 搜索商品",
+        "menu_brands": "🏷 品牌列表",
+        "menu_pricing": "📊 价格说明",
+        "menu_lang": "🔤 语言 / Язык",
+        "menu_help": "❓ 帮助",
+        "search_prompt": "🔍 请输入商品名称或品牌名：",
     },
 }
 
 
 def t(ctx: ContextTypes.DEFAULT_TYPE, key: str, **kwargs) -> str:
-    """Get translated string for user's language."""
     lang = ctx.user_data.get("lang", "ru")
     template = L.get(lang, L["ru"]).get(key, key)
     return template.format(**kwargs) if kwargs else template
 
 
-# ── Pricing logic ─────────────────────────────────────────────────────────
-def calc_customer_price(base_price: float) -> tuple[float, float]:
-    """
-    Returns (customer_cny, customer_rub).
-    base_price is the product price from the database (already +¥50 markup).
-    """
-    total_cost = base_price + OVERHEAD  # product + delivery + storage
+def get_lang(ctx: ContextTypes.DEFAULT_TYPE) -> str:
+    return ctx.user_data.get("lang", "ru")
 
+
+def get_menu_keyboard(ctx: ContextTypes.DEFAULT_TYPE) -> ReplyKeyboardMarkup:
+    """Build the persistent bottom menu keyboard."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(t(ctx, "menu_search")), KeyboardButton(t(ctx, "menu_brands"))],
+            [KeyboardButton(t(ctx, "menu_pricing")), KeyboardButton(t(ctx, "menu_lang"))],
+            [KeyboardButton(t(ctx, "menu_help"))],
+        ],
+        resize_keyboard=True,
+    )
+
+
+# ── Pricing ───────────────────────────────────────────────────────────────
+def calc_customer_price(base_price: float) -> tuple[float, float]:
+    total_cost = base_price + OVERHEAD
     if base_price < 200:
         profit = 60
     elif base_price < 500:
         profit = 120
     else:
         profit = total_cost * 0.30
-
-    customer_cny = math.ceil(total_cost + profit)  # round up to whole yuan
+    customer_cny = math.ceil(total_cost + profit)
     customer_rub = round(customer_cny * CNY_TO_RUB)
     return customer_cny, customer_rub
 
 
-# ── Search logic ──────────────────────────────────────────────────────────
+# ── Search ────────────────────────────────────────────────────────────────
 def _norm(s: str) -> str:
-    """Normalize text: lowercase, strip accents (é→e, ô→o), for fuzzy matching."""
     s = s.lower()
-    # Decompose unicode, strip combining marks (accents) and apostrophes
     nfkd = unicodedata.normalize("NFKD", s)
     return "".join(c for c in nfkd if not unicodedata.combining(c) and c not in "''")
 
-# Pre-build reverse English→Chinese brand map (normalized)
+# Build reverse English→Chinese brand map
 _EN_TO_ZH: dict[str, str] = {}
 for _zh, _en in TB.items():
     _EN_TO_ZH[_norm(_en)] = _zh
 
+# Also index Russian brand names
+for _zh, _ru in TB_RU.items():
+    _EN_TO_ZH[_norm(_ru)] = _zh
+
+
 def search_products(query: str) -> list[dict]:
-    """Search products by name or brand (case-insensitive, accent-insensitive)."""
     q = _norm(query.strip())
     if not q:
         return []
 
-    # First check if query matches an English brand name → get Chinese brand
     matched_zh_brands = set()
-    for en_norm, zh in _EN_TO_ZH.items():
-        if q in en_norm:
+    for name_norm, zh in _EN_TO_ZH.items():
+        if q in name_norm:
             matched_zh_brands.add(zh)
 
     results = []
@@ -219,8 +276,10 @@ def search_products(query: str) -> list[dict]:
 
 
 def format_product(p: dict, idx: int, ctx: ContextTypes.DEFAULT_TYPE) -> str:
-    """Format a single product as a text block."""
-    brand = TB.get(p["b"], p["b"])
+    """Format a product — fully translated based on user language."""
+    lang = get_lang(ctx)
+    name = tr_name(p["n"], lang)
+    brand = tr_brand(p["b"], lang)
 
     if p["p"] < 0:
         price_str = t(ctx, "ask_price")
@@ -229,7 +288,7 @@ def format_product(p: dict, idx: int, ctx: ContextTypes.DEFAULT_TYPE) -> str:
         price_str = t(ctx, "price_line", cny=cny, rub=rub)
 
     return (
-        f"<b>{idx}.</b> {p['n']}\n"
+        f"<b>{idx}.</b> {name}\n"
         f"   🏷 {brand}\n"
         f"{price_str}"
     )
@@ -240,17 +299,23 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if "lang" not in ctx.user_data:
         ctx.user_data["lang"] = "ru"
     await update.message.reply_text(
-        t(ctx, "welcome"), parse_mode="HTML"
+        t(ctx, "welcome"),
+        parse_mode="HTML",
+        reply_markup=get_menu_keyboard(ctx),
     )
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(t(ctx, "help"), parse_mode="HTML")
+    await update.message.reply_text(
+        t(ctx, "help"), parse_mode="HTML",
+        reply_markup=get_menu_keyboard(ctx),
+    )
 
 
 async def cmd_pricing(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        t(ctx, "pricing_info", rate=CNY_TO_RUB), parse_mode="HTML"
+        t(ctx, "pricing_info", rate=CNY_TO_RUB), parse_mode="HTML",
+        reply_markup=get_menu_keyboard(ctx),
     )
 
 
@@ -262,21 +327,21 @@ async def cmd_lang(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ]
     ]
     await update.message.reply_text(
-        "🔤 Choose language / 选择语言:",
+        "🔤 Выберите язык / 选择语言:",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
 
 async def cmd_brands(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # Show top 30 brands as inline buttons
+    lang = get_lang(ctx)
     top = BRANDS[:30]
     rows = []
     row = []
-    for name, count in top:
-        label = TB.get(name, name)
+    for name_zh, count in top:
+        label = tr_brand(name_zh, lang)
         short = label[:15] if len(label) > 15 else label
         row.append(InlineKeyboardButton(
-            f"{short} ({count})", callback_data=f"brand:{name}"
+            f"{short} ({count})", callback_data=f"brand:{name_zh}"
         ))
         if len(row) == 2:
             rows.append(row)
@@ -299,15 +364,24 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith("lang:"):
         lang = data.split(":")[1]
         ctx.user_data["lang"] = lang
+        # Send language confirmation + refresh menu
         await query.edit_message_text(t(ctx, "lang_switched"), parse_mode="HTML")
+        # Send a new message with updated menu
+        await query.message.reply_text(
+            t(ctx, "welcome"),
+            parse_mode="HTML",
+            reply_markup=get_menu_keyboard(ctx),
+        )
 
     elif data.startswith("brand:"):
-        brand = data.split(":", 1)[1]
-        ctx.user_data["last_query"] = brand
+        brand_zh = data.split(":", 1)[1]
+        lang = get_lang(ctx)
+        display_q = tr_brand(brand_zh, lang)
+        ctx.user_data["last_query"] = display_q
         ctx.user_data["page"] = 0
-        results = [p for p in PRODUCTS if p["b"] == brand]
+        results = [p for p in PRODUCTS if p["b"] == brand_zh]
         ctx.user_data["results"] = results
-        await send_results_page(query.message, ctx, brand, edit=True)
+        await send_results_page(query.message, ctx, display_q, edit=True)
 
     elif data.startswith("page:"):
         page = int(data.split(":")[1])
@@ -316,24 +390,54 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send_results_page(query.message, ctx, q, edit=True)
 
 
-async def handle_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Handle any text message as a search query."""
-    q = update.message.text.strip()
-    if not q or len(q) > 100:
+async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle text messages — either menu buttons or search queries."""
+    text = update.message.text.strip()
+    if not text or len(text) > 100:
         return
 
-    results = search_products(q)
-    ctx.user_data["last_query"] = q
+    # Check if it's a menu button press
+    lang = get_lang(ctx)
+    menu_search = L[lang]["menu_search"]
+    menu_brands = L[lang]["menu_brands"]
+    menu_pricing = L[lang]["menu_pricing"]
+    menu_lang = L[lang]["menu_lang"]
+    menu_help = L[lang]["menu_help"]
+
+    if text == menu_search:
+        await update.message.reply_text(
+            t(ctx, "search_prompt"), parse_mode="HTML",
+            reply_markup=get_menu_keyboard(ctx),
+        )
+        return
+    elif text == menu_brands:
+        await cmd_brands(update, ctx)
+        return
+    elif text == menu_pricing:
+        await cmd_pricing(update, ctx)
+        return
+    elif text == menu_lang:
+        await cmd_lang(update, ctx)
+        return
+    elif text == menu_help:
+        await cmd_help(update, ctx)
+        return
+
+    # Otherwise treat as search
+    results = search_products(text)
+    lang = get_lang(ctx)
+    # If user typed an English/Russian brand, show that as query display
+    display_q = text
+    ctx.user_data["last_query"] = display_q
     ctx.user_data["results"] = results
     ctx.user_data["page"] = 0
 
-    await send_results_page(update.message, ctx, q)
+    await send_results_page(update.message, ctx, display_q)
 
 
 async def send_results_page(
     message, ctx: ContextTypes.DEFAULT_TYPE, query: str, edit: bool = False
 ):
-    """Send a page of search results with pagination."""
     results = ctx.user_data.get("results", [])
     page = ctx.user_data.get("page", 0)
     total = len(results)
@@ -343,7 +447,8 @@ async def send_results_page(
         if edit:
             await message.edit_text(text, parse_mode="HTML")
         else:
-            await message.reply_text(text, parse_mode="HTML")
+            await message.reply_text(text, parse_mode="HTML",
+                                     reply_markup=get_menu_keyboard(ctx))
         return
 
     total_pages = math.ceil(total / ITEMS_PER_PAGE)
@@ -359,7 +464,6 @@ async def send_results_page(
     lines.append(t(ctx, "page", cur=page + 1, total=total_pages))
     lines.append(t(ctx, "pricing_note"))
 
-    # Pagination buttons
     buttons = []
     if page > 0:
         buttons.append(InlineKeyboardButton(
@@ -394,9 +498,10 @@ def main():
     app.add_handler(CommandHandler("lang", cmd_lang))
     app.add_handler(CommandHandler("brands", cmd_brands))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("🤖 Bot started! Loaded %d products, %d brands.", len(PRODUCTS), len(BRANDS))
+    logger.info("🤖 Bot started! %d products, %d brands, %d EN terms, %d RU terms.",
+                len(PRODUCTS), len(BRANDS), len(TD_EN), len(TD_RU))
     app.run_polling(drop_pending_updates=True)
 
 
