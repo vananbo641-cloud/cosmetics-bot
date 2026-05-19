@@ -18,7 +18,7 @@ Pricing formula:
   customer_rub   = customer_price × CNY_TO_RUB rate
 """
 
-import json, os, math, re, logging, unicodedata
+import json, os, math, re, logging, unicodedata, html as html_mod
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     ReplyKeyboardMarkup, KeyboardButton,
@@ -102,6 +102,19 @@ EN_SEARCH_MAP = {
 
 
 # ── Translation engine ────────────────────────────────────────────────────
+# Extra brand translations for brands not in the website's translation table
+_EXTRA_BRANDS = {
+    "高姿": "Gaoze",
+    "红之": "Hongzhi",
+    "柳丝木": "Liumusilk",
+    "科蕴兰": "Keyunlan",
+    "施巴": "Sebamed",
+    "三资堂": "Sanzitang",
+    "朱栈": "Zhuzhan",
+    "苏酷": "Suku",
+}
+
+
 def tr_brand(brand_zh: str, lang: str) -> str:
     if lang == "zh":
         return brand_zh
@@ -109,6 +122,8 @@ def tr_brand(brand_zh: str, lang: str) -> str:
         return TB_RU[brand_zh]
     if brand_zh in TB:
         return TB[brand_zh]
+    if brand_zh in _EXTRA_BRANDS:
+        return _EXTRA_BRANDS[brand_zh]
     return brand_zh
 
 
@@ -120,14 +135,22 @@ def tr_name(name: str, lang: str) -> str:
     td = TD_RU if lang == "ru" else TD_EN
     keys = _TK_RU if lang == "ru" else _TK_EN
 
+    # Mark already-translated spans to avoid double-translation
+    # Use \x00...\x01 markers around translated text
+    def _mark(text):
+        return "\x00" + text + "\x01"
+
     for zh, en in TB.items():
         if zh in r:
             rep = TB_RU.get(zh, en) if lang == "ru" else en
-            r = r.replace(zh, rep + " ")
+            r = r.replace(zh, _mark(rep) + " ")
 
     for k in keys:
         if k in r:
-            r = r.replace(k, " " + td[k] + " ")
+            r = r.replace(k, " " + _mark(td[k]) + " ")
+
+    # Remove markers
+    r = r.replace("\x00", "").replace("\x01", "")
 
     r = re.sub(r"\s{2,}", " ", r).strip()
     r = re.sub(r"([a-zA-ZÀ-ɏ])(\d)", r"\1 \2", r)
@@ -135,9 +158,16 @@ def tr_name(name: str, lang: str) -> str:
     r = re.sub(r"([一-鿿])([A-Za-zÀ-ɏЀ-ӿ])", r"\1 \2", r)
     r = re.sub(r"([A-Za-zÀ-ɏЀ-ӿ])([一-鿿])", r"\1 \2", r)
 
+    # Strip remaining CJK
     r = re.sub(r"[一-鿿㐀-䶿　-〿぀-ゟ゠-ヿ]+", " ", r)
-    r = re.sub(r"\s{2,}", " ", r).strip()
-    return r
+
+    # Deduplicate consecutive identical words (e.g. "Cream Cream" → "Cream")
+    words = re.sub(r"\s{2,}", " ", r).strip().split()
+    deduped = []
+    for w in words:
+        if not deduped or w.lower() != deduped[-1].lower():
+            deduped.append(w)
+    return " ".join(deduped)
 
 
 # ── i18n ──────────────────────────────────────────────────────────────────
@@ -211,6 +241,77 @@ L = {
             "Напишите мне напрямую — я помогу с заказом!\n\n"
             f"📩 Telegram: <b>{CONTACT}</b>\n\n"
             "Отправьте название товара и я подготовлю заказ 💫"
+        ),
+    },
+    "en": {
+        "welcome": (
+            "✨ <b>Yan's Beauty Shop</b> ✨\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🌸 <i>Premium cosmetics from China — delivered to your door</i>\n\n"
+            "🔹 6600+ products from 350 brands\n"
+            "🔹 Price includes delivery to Russia\n"
+            "🔹 Chanel, Dior, Lancôme, La Mer & more\n\n"
+            "Just type a product name — I'll find it\n"
+            "and show you the final price! 💰\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📩 Order: {CONTACT}\n"
+            "👇 Choose an action:"
+        ),
+        "no_results": (
+            "😕 Nothing found for \"{q}\".\n\n"
+            "💡 <b>Tips:</b>\n"
+            "• Try shorter keywords: <code>Dior cream</code>\n"
+            "• Brand in English: <code>Chanel</code>\n"
+            "• Product type: <code>mask</code>, <code>serum</code>, <code>lipstick</code>\n"
+            "• Or tap 🏷 Brands"
+        ),
+        "found": "🔍 Found <b>{n}</b> products for \"<b>{q}</b>\":",
+        "price_line": "   💰 <b>¥{cny}</b>  (~<b>{rub} ₽</b>)",
+        "page": "📄 Page {cur} of {total}",
+        "ask_price": "   📞 Price on request",
+        "brands_title": "🏷 <b>Popular Brands</b>\nTap to browse products:",
+        "lang_switched": "✅ Language: English 🇬🇧",
+        "prev": "⬅️ Prev",
+        "next": "➡️ Next",
+        "pricing_note": (
+            "\n<i>💡 Price = product + delivery + storage</i>\n"
+            f"📩 <b>Order:</b> {CONTACT}"
+        ),
+        "help": (
+            "📖 <b>How to use:</b>\n\n"
+            "🔍 Just type what you're looking for:\n"
+            "   • <code>Dior lipstick</code>\n"
+            "   • <code>Chanel cream</code>\n"
+            "   • <code>face mask</code>\n"
+            "   • <code>lancome serum</code>\n\n"
+            "I understand English, Russian and Chinese!\n\n"
+            "🏷 /brands — popular brands\n"
+            "📊 /pricing — how prices work\n"
+            "🔤 /lang — change language\n\n"
+            f"📩 <b>Order:</b> {CONTACT}"
+        ),
+        "pricing_info": (
+            "📊 <b>How pricing works:</b>\n\n"
+            "1️⃣ Wholesale product price\n"
+            "2️⃣ + Shipping from China (~$6)\n"
+            "3️⃣ + Warehouse storage (7 days)\n"
+            "4️⃣ + Service fee\n\n"
+            "= <b>Final price</b> in ¥ and ₽\n\n"
+            "💱 Rate: 1 ¥ ≈ {rate} ₽\n\n"
+            f"📩 <b>Order:</b> {CONTACT}"
+        ),
+        "menu_search": "🔍 Search",
+        "menu_brands": "🏷 Brands",
+        "menu_pricing": "📊 Pricing",
+        "menu_lang": "🔤 Language",
+        "menu_help": "❓ Help",
+        "menu_buy": "🛒 Order",
+        "search_prompt": "🔍 Type a product name or brand.\n\nExamples: <code>Dior cream</code>, <code>mask</code>, <code>Chanel</code>",
+        "buy_msg": (
+            "🛒 <b>Want to order?</b>\n\n"
+            "Message me directly — I'll help with your order!\n\n"
+            f"📩 Telegram: <b>{CONTACT}</b>\n\n"
+            "Send the product name and I'll arrange it 💫"
         ),
     },
     "zh": {
@@ -333,6 +434,8 @@ for _zh, _en in TB.items():
     _EN_TO_ZH[_norm(_en)] = _zh
 for _zh, _ru in TB_RU.items():
     _EN_TO_ZH[_norm(_ru)] = _zh
+for _zh, _en in _EXTRA_BRANDS.items():
+    _EN_TO_ZH[_norm(_en)] = _zh
 
 
 def _expand_word(w: str) -> dict:
@@ -471,8 +574,8 @@ def search_products(query: str) -> list[dict]:
 
 def format_product(p: dict, idx: int, ctx: ContextTypes.DEFAULT_TYPE) -> str:
     lang = get_lang(ctx)
-    name = tr_name(p["n"], lang)
-    brand = tr_brand(p["b"], lang)
+    name = html_mod.escape(tr_name(p["n"], lang))
+    brand = html_mod.escape(tr_brand(p["b"], lang))
 
     if p["p"] < 0:
         price_str = t(ctx, "ask_price")
@@ -516,11 +619,12 @@ async def cmd_lang(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     buttons = [
         [
             InlineKeyboardButton("🇷🇺 Русский", callback_data="lang:ru"),
+            InlineKeyboardButton("🇬🇧 English", callback_data="lang:en"),
             InlineKeyboardButton("🇨🇳 中文", callback_data="lang:zh"),
         ]
     ]
     await update.message.reply_text(
-        "🔤 Выберите язык / 选择语言:",
+        "🔤 Выберите язык / Language / 选择语言:",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
@@ -586,31 +690,38 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not text or len(text) > 100:
         return
 
-    lang = get_lang(ctx)
+    # Check menu buttons across all languages (keyboard may lag behind lang switch)
+    _menu_keys = ("menu_search", "menu_brands", "menu_pricing", "menu_lang",
+                  "menu_help", "menu_buy")
+    matched_key = None
+    for _l in L:
+        for key in _menu_keys:
+            if text == L[_l][key]:
+                matched_key = key
+                break
+        if matched_key:
+            break
 
-    # Check menu buttons
-    for key in ("menu_search", "menu_brands", "menu_pricing", "menu_lang",
-                "menu_help", "menu_buy"):
-        if text == L[lang][key]:
-            if key == "menu_search":
-                await update.message.reply_text(
-                    t(ctx, "search_prompt"), parse_mode="HTML",
-                    reply_markup=get_menu_keyboard(ctx),
-                )
-            elif key == "menu_brands":
-                await cmd_brands(update, ctx)
-            elif key == "menu_pricing":
-                await cmd_pricing(update, ctx)
-            elif key == "menu_lang":
-                await cmd_lang(update, ctx)
-            elif key == "menu_help":
-                await cmd_help(update, ctx)
-            elif key == "menu_buy":
-                await update.message.reply_text(
-                    t(ctx, "buy_msg"), parse_mode="HTML",
-                    reply_markup=get_menu_keyboard(ctx),
-                )
-            return
+    if matched_key:
+        if matched_key == "menu_search":
+            await update.message.reply_text(
+                t(ctx, "search_prompt"), parse_mode="HTML",
+                reply_markup=get_menu_keyboard(ctx),
+            )
+        elif matched_key == "menu_brands":
+            await cmd_brands(update, ctx)
+        elif matched_key == "menu_pricing":
+            await cmd_pricing(update, ctx)
+        elif matched_key == "menu_lang":
+            await cmd_lang(update, ctx)
+        elif matched_key == "menu_help":
+            await cmd_help(update, ctx)
+        elif matched_key == "menu_buy":
+            await update.message.reply_text(
+                t(ctx, "buy_msg"), parse_mode="HTML",
+                reply_markup=get_menu_keyboard(ctx),
+            )
+        return
 
     # Otherwise treat as search
     results = search_products(text)
@@ -629,7 +740,7 @@ async def send_results_page(
     total = len(results)
 
     if not results:
-        text = t(ctx, "no_results", q=query)
+        text = t(ctx, "no_results", q=html_mod.escape(query))
         if edit:
             await message.edit_text(text, parse_mode="HTML")
         else:
@@ -642,7 +753,7 @@ async def send_results_page(
     end = start + ITEMS_PER_PAGE
     page_items = results[start:end]
 
-    lines = [t(ctx, "found", q=query, n=total), ""]
+    lines = [t(ctx, "found", q=html_mod.escape(query), n=total), ""]
     for i, p in enumerate(page_items, start=start + 1):
         lines.append(format_product(p, i, ctx))
         lines.append("")
