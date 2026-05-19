@@ -19,6 +19,7 @@ Pricing formula:
 """
 
 import json, os, math, re, logging, unicodedata, html as html_mod
+from urllib.parse import quote_plus
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     ReplyKeyboardMarkup, KeyboardButton,
@@ -47,6 +48,14 @@ _dir = os.path.dirname(os.path.abspath(__file__))
 
 with open(os.path.join(_dir, "products.json"), "r") as f:
     PRODUCTS = json.load(f)
+
+# Brand images (logo/product thumbnails)
+_bi_path = os.path.join(_dir, "brand_images.json")
+if os.path.exists(_bi_path):
+    with open(_bi_path, "r") as f:
+        BRAND_IMAGES = json.load(f)
+else:
+    BRAND_IMAGES = {}
 
 with open(os.path.join(_dir, "translations.json"), "r") as f:
     _tr = json.load(f)
@@ -572,6 +581,24 @@ def search_products(query: str) -> list[dict]:
     return []
 
 
+def get_brand_image(brand_zh: str):
+    """Get brand logo image URL if available."""
+    if brand_zh in BRAND_IMAGES:
+        return BRAND_IMAGES[brand_zh]
+    # Try partial match for mixed-name brands like "Dior迪奥"
+    for key, url in BRAND_IMAGES.items():
+        if brand_zh in key or key in brand_zh:
+            return url
+    return None
+
+
+def get_product_image_url(product_name: str, brand_zh: str) -> str:
+    """Generate a Google Images search URL for a product."""
+    brand_en = TB.get(brand_zh, brand_zh)
+    query = f"{brand_en} {product_name}"
+    return f"https://www.google.com/search?tbm=isch&q={quote_plus(query)}"
+
+
 def format_product(p: dict, idx: int, ctx: ContextTypes.DEFAULT_TYPE) -> str:
     lang = get_lang(ctx)
     name = html_mod.escape(tr_name(p["n"], lang))
@@ -588,6 +615,45 @@ def format_product(p: dict, idx: int, ctx: ContextTypes.DEFAULT_TYPE) -> str:
         f"   🏷 {brand}\n"
         f"{price_str}"
     )
+
+
+def format_product_detail(p: dict, ctx: ContextTypes.DEFAULT_TYPE) -> str:
+    """Detailed product card with full info."""
+    lang = get_lang(ctx)
+    name = html_mod.escape(tr_name(p["n"], lang))
+    brand = html_mod.escape(tr_brand(p["b"], lang))
+    name_zh = html_mod.escape(p["n"])
+
+    if p["p"] < 0:
+        price_cny = t(ctx, "ask_price")
+        price_rub = ""
+    else:
+        cny, rub = calc_customer_price(p["p"])
+        price_cny = f"¥{cny}"
+        price_rub = f"~{rub} ₽"
+
+    labels = {
+        "ru": {"name": "Товар", "brand": "Бренд", "orig": "Оригинал",
+               "price": "Цена", "order": "Заказать"},
+        "en": {"name": "Product", "brand": "Brand", "orig": "Original",
+               "price": "Price", "order": "Order"},
+        "zh": {"name": "商品", "brand": "品牌", "orig": "原名",
+               "price": "价格", "order": "下单"},
+    }
+    lb = labels.get(lang, labels["ru"])
+
+    lines = [
+        f"🛍 <b>{name}</b>\n",
+        f"🏷 <b>{lb['brand']}:</b> {brand}",
+        f"📝 <b>{lb['orig']}:</b> {name_zh}",
+    ]
+    if p["p"] >= 0:
+        lines.append(f"💰 <b>{lb['price']}:</b> {price_cny}  ({price_rub})")
+    else:
+        lines.append(f"💰 <b>{lb['price']}:</b> {price_cny}")
+    lines.append(f"\n📩 <b>{lb['order']}:</b> {CONTACT}")
+
+    return "\n".join(lines)
 
 
 # ── Handlers ──────────────────────────────────────────────────────────────
@@ -684,6 +750,54 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         q = ctx.user_data.get("last_query", "")
         await send_results_page(query.message, ctx, q, edit=True)
 
+    elif data.startswith("photo:"):
+        # Show product detail with photo
+        idx = int(data.split(":")[1])
+        results = ctx.user_data.get("results", [])
+        if 0 <= idx < len(results):
+            p = results[idx]
+            detail_text = format_product_detail(p, ctx)
+            brand_img = get_brand_image(p["b"])
+            lang = get_lang(ctx)
+
+            # "Search photo" button
+            search_url = get_product_image_url(p["n"], p["b"])
+            search_label = {"ru": "🔍 Фото в Google",
+                            "en": "🔍 Photo on Google",
+                            "zh": "🔍 搜索图片"}.get(lang, "🔍 Photo")
+            buy_label = {"ru": f"🛒 Заказать ({CONTACT})",
+                         "en": f"🛒 Order ({CONTACT})",
+                         "zh": f"🛒 下单 ({CONTACT})"}.get(lang, "🛒 Order")
+            back_label = {"ru": "⬅️ Назад к списку",
+                          "en": "⬅️ Back to list",
+                          "zh": "⬅️ 返回列表"}.get(lang, "⬅️ Back")
+
+            buttons = [
+                [InlineKeyboardButton(search_label, url=search_url)],
+                [InlineKeyboardButton(buy_label, url=f"https://t.me/{CONTACT[1:]}")],
+                [InlineKeyboardButton(back_label, callback_data=f"page:{ctx.user_data.get('page', 0)}")],
+            ]
+            markup = InlineKeyboardMarkup(buttons)
+
+            if brand_img:
+                # Send brand image with product details as caption
+                try:
+                    await query.message.reply_photo(
+                        photo=brand_img,
+                        caption=detail_text,
+                        parse_mode="HTML",
+                        reply_markup=markup,
+                    )
+                except Exception:
+                    # Fallback to text if image fails
+                    await query.message.reply_text(
+                        detail_text, parse_mode="HTML", reply_markup=markup,
+                    )
+            else:
+                await query.message.reply_text(
+                    detail_text, parse_mode="HTML", reply_markup=markup,
+                )
+
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -753,6 +867,9 @@ async def send_results_page(
     end = start + ITEMS_PER_PAGE
     page_items = results[start:end]
 
+    lang = get_lang(ctx)
+    photo_label = {"ru": "📷", "en": "📷", "zh": "📷"}.get(lang, "📷")
+
     lines = [t(ctx, "found", q=html_mod.escape(query), n=total), ""]
     for i, p in enumerate(page_items, start=start + 1):
         lines.append(format_product(p, i, ctx))
@@ -761,17 +878,35 @@ async def send_results_page(
     lines.append(t(ctx, "page", cur=page + 1, total=total_pages))
     lines.append(t(ctx, "pricing_note"))
 
-    buttons = []
+    # Product photo buttons (2 per row)
+    keyboard_rows = []
+    photo_row = []
+    for i, p in enumerate(page_items, start=start):
+        short_name = tr_name(p["n"], lang)[:20]
+        photo_row.append(InlineKeyboardButton(
+            f"{photo_label} {i+1}. {short_name}",
+            callback_data=f"photo:{i}"
+        ))
+        if len(photo_row) == 2:
+            keyboard_rows.append(photo_row)
+            photo_row = []
+    if photo_row:
+        keyboard_rows.append(photo_row)
+
+    # Navigation buttons
+    nav_buttons = []
     if page > 0:
-        buttons.append(InlineKeyboardButton(
+        nav_buttons.append(InlineKeyboardButton(
             t(ctx, "prev"), callback_data=f"page:{page - 1}"
         ))
     if page < total_pages - 1:
-        buttons.append(InlineKeyboardButton(
+        nav_buttons.append(InlineKeyboardButton(
             t(ctx, "next"), callback_data=f"page:{page + 1}"
         ))
+    if nav_buttons:
+        keyboard_rows.append(nav_buttons)
 
-    markup = InlineKeyboardMarkup([buttons]) if buttons else None
+    markup = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
     text = "\n".join(lines)
 
     if edit:
