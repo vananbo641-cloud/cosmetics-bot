@@ -3,18 +3,16 @@ Cosmetics Price Bot — Telegram bot for searching cosmetics and calculating
 the final customer price including delivery + storage + profit margin.
 
 Pricing formula:
-  base_cost    = product price (already includes ¥50 wholesale markup)
-  delivery     = $6 ≈ ¥43  (China → Russia shipping per item)
-  storage      = 7 days × $1/day = $7 ≈ ¥50
-  overhead     = ¥93
-  total_cost   = base_cost + overhead
+  cost = base_price + ¥70 overhead (¥35 delivery + ¥35 storage)
 
-  Profit tiers (based on base_cost):
-    base < ¥200  → +¥60
-    ¥200–¥500    → +¥120
-    base ≥ ¥500  → +30% of total_cost
+  Profit (smooth sliding scale):
+    ≤¥100     → +¥35 flat
+    ¥100–200  → ¥35–70 sliding
+    ¥200–500  → ¥70–145 sliding
+    ¥500–1000 → +20% of cost
+    ≥¥1000    → +18% of cost
 
-  customer_price = total_cost + profit
+  customer_price = cost + profit
   customer_rub   = customer_price × CNY_TO_RUB rate
 """
 
@@ -36,9 +34,9 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CONTACT   = "@WongnoW225"
 
-DELIVERY_CNY = 43
-STORAGE_CNY  = 50
-OVERHEAD     = DELIVERY_CNY + STORAGE_CNY   # ¥93
+DELIVERY_CNY = 35
+STORAGE_CNY  = 35
+OVERHEAD     = DELIVERY_CNY + STORAGE_CNY   # ¥70
 
 CNY_TO_RUB   = 12.0
 ITEMS_PER_PAGE = 8
@@ -419,14 +417,30 @@ def get_menu_keyboard(ctx: ContextTypes.DEFAULT_TYPE) -> ReplyKeyboardMarkup:
 
 # ── Pricing ───────────────────────────────────────────────────────────────
 def calc_customer_price(base_price: float) -> tuple[float, float]:
-    total_cost = base_price + OVERHEAD
-    if base_price < 200:
-        profit = 60
-    elif base_price < 500:
-        profit = 120
+    """
+    Smart pricing: smooth curve with no sudden jumps.
+    Lower items → competitive price to attract customers.
+    Higher items → good absolute profit, reasonable %.
+
+    Tiers:
+      ≤¥100 (samples, lip products)   → +¥35 flat
+      ¥100–200 (full-size basics)     → ¥35 → ¥70 sliding
+      ¥200–500 (premium skincare)     → ¥70 → ¥145 sliding
+      ¥500–1000 (luxury, perfume)     → +20% of cost
+      ≥¥1000 (gift sets, ultra-lux)   → +18% of cost
+    """
+    cost = base_price + OVERHEAD
+    if base_price <= 100:
+        profit = 35
+    elif base_price <= 200:
+        profit = 35 + (base_price - 100) * 0.35
+    elif base_price <= 500:
+        profit = 70 + (base_price - 200) * 0.25
+    elif base_price <= 1000:
+        profit = cost * 0.20
     else:
-        profit = total_cost * 0.30
-    customer_cny = math.ceil(total_cost + profit)
+        profit = cost * 0.18
+    customer_cny = math.ceil(cost + profit)
     customer_rub = round(customer_cny * CNY_TO_RUB)
     return customer_cny, customer_rub
 
