@@ -26,7 +26,7 @@ from telegram import (
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, filters,
+    ContextTypes, filters, PicklePersistence,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -966,7 +966,8 @@ def main():
         print("   export BOT_TOKEN='your-telegram-bot-token'")
         return
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    persistence = PicklePersistence(filepath=os.path.join(_dir, "bot_data.pickle"))
+    app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
