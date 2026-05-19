@@ -764,17 +764,22 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["page"] = 0
         results = [p for p in PRODUCTS if p["b"] == brand_zh]
         ctx.user_data["results"] = results
-        await send_results_page(query.message, ctx, display_q, edit=True)
+        try:
+            await send_results_page(query.message, ctx, display_q, edit=True)
+        except Exception:
+            await send_results_page(query.message, ctx, display_q, edit=False)
 
     elif data.startswith("page:"):
         page = int(data.split(":")[1])
         ctx.user_data["page"] = page
         q = ctx.user_data.get("last_query", "")
-        # Try edit first; if it fails (e.g. editing a photo message), send new
         try:
             await send_results_page(query.message, ctx, q, edit=True)
         except Exception:
-            await send_results_page(query.message, ctx, q, edit=False)
+            try:
+                await send_results_page(query.message, ctx, q, edit=False)
+            except Exception:
+                pass
 
     elif data.startswith("photo:"):
         # Show product detail with photo
@@ -941,7 +946,12 @@ async def send_results_page(
     text = "\n".join(lines)
 
     if edit:
-        await message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+        try:
+            await message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+        except Exception as e:
+            if "not modified" not in str(e).lower():
+                # Not a "message not modified" error — send as new message
+                await message.reply_text(text, parse_mode="HTML", reply_markup=markup)
     else:
         await message.reply_text(text, parse_mode="HTML", reply_markup=markup)
 
