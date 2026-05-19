@@ -592,10 +592,26 @@ def get_brand_image(brand_zh: str):
     return None
 
 
-def get_product_image_url(product_name: str, brand_zh: str) -> str:
-    """Generate a Google Images search URL for a product."""
+def get_product_image_url(product_name: str, brand_zh: str, lang: str = "en") -> str:
+    """Generate a Google Images search URL for a product using translated name."""
     brand_en = TB.get(brand_zh, brand_zh)
-    query = f"{brand_en} {product_name}"
+    # Use English translated name for best Google Images results
+    name_en = tr_name(product_name, "en")
+    # Strip size/weight info and packaging details for cleaner search
+    clean = re.sub(r"\d+\s*(ml|g|oz|мл|гр)\b", "", name_en, flags=re.IGNORECASE)
+    # Strip packaging words that clutter the search
+    clean = re.sub(
+        r"\b(Full Size|Sample|Set|Pack|Refill|New Batch|In Stock|"
+        r"w/ Box|w/ Code|w/ Pump|Gen \d|Edition|Boxed|Pouch|"
+        r"Trial|Travel Size|Duty Free|Medium|Small|Large)\b",
+        "", clean, flags=re.IGNORECASE
+    )
+    clean = re.sub(r"\s{2,}", " ", clean).strip()
+    # If brand already appears in the translated name, don't duplicate
+    if brand_en.lower() not in clean.lower():
+        query = f"{brand_en} {clean}"
+    else:
+        query = clean
     return f"https://www.google.com/search?tbm=isch&q={quote_plus(query)}"
 
 
@@ -727,8 +743,14 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith("lang:"):
         lang = data.split(":")[1]
         ctx.user_data["lang"] = lang
-        await query.edit_message_text(t(ctx, "lang_switched"), parse_mode="HTML")
-        await query.message.reply_text(
+        # Update the inline message to show confirmation
+        try:
+            await query.edit_message_text(t(ctx, "lang_switched"), parse_mode="HTML")
+        except Exception:
+            pass
+        # Send welcome message with NEW keyboard to the chat
+        chat = update.effective_chat
+        await chat.send_message(
             t(ctx, "welcome"),
             parse_mode="HTML",
             reply_markup=get_menu_keyboard(ctx),
