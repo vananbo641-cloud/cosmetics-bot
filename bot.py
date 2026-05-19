@@ -770,13 +770,20 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         page = int(data.split(":")[1])
         ctx.user_data["page"] = page
         q = ctx.user_data.get("last_query", "")
-        await send_results_page(query.message, ctx, q, edit=True)
+        # Try edit first; if it fails (e.g. editing a photo message), send new
+        try:
+            await send_results_page(query.message, ctx, q, edit=True)
+        except Exception:
+            await send_results_page(query.message, ctx, q, edit=False)
 
     elif data.startswith("photo:"):
         # Show product detail with photo
         idx = int(data.split(":")[1])
         results = ctx.user_data.get("results", [])
-        if 0 <= idx < len(results):
+        if not results or idx < 0 or idx >= len(results):
+            await query.message.reply_text("⚠️ Product not found. Please search again.")
+            return
+        if True:
             p = results[idx]
             detail_text = format_product_detail(p, ctx)
             brand_img = get_brand_image(p["b"])
@@ -822,6 +829,8 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
     text = update.message.text.strip()
     if not text or len(text) > 100:
         return
@@ -937,6 +946,19 @@ async def send_results_page(
         await message.reply_text(text, parse_mode="HTML", reply_markup=markup)
 
 
+# ── Error handler ────────────────────────────────────────────────────────
+async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    """Log errors and notify user gracefully."""
+    logger.error("Exception while handling update: %s", ctx.error)
+    if update and hasattr(update, "effective_chat") and update.effective_chat:
+        try:
+            await update.effective_chat.send_message(
+                "⚠️ Something went wrong. Please try again or /start to reset."
+            )
+        except Exception:
+            pass
+
+
 # ── Main ──────────────────────────────────────────────────────────────────
 def main():
     if not BOT_TOKEN:
@@ -953,6 +975,7 @@ def main():
     app.add_handler(CommandHandler("brands", cmd_brands))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(error_handler)
 
     logger.info("🤖 Bot started! %d products, %d brands.", len(PRODUCTS), len(BRANDS))
     app.run_polling(drop_pending_updates=True)
