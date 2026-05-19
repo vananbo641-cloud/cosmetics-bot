@@ -697,7 +697,7 @@ async def cmd_lang(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_brands(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lang = get_lang(ctx)
-    top = BRANDS[:30]
+    top = BRANDS[:40]
     rows = []
     row = []
     for name_zh, count in top:
